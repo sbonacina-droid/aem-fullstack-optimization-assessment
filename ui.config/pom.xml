@@ -13,7 +13,7 @@
     <artifactId>assessment.ui.config</artifactId>
     <packaging>content-package</packaging>
     <name>Assessment - UI Config</name>
-    
+
     <dependencies>
         <dependency>
             <groupId>com.assessment</groupId>
@@ -32,19 +32,17 @@
                 <extensions>true</extensions>
                 <configuration>
                     <group>assessment</group>
-                    <packageType>application</packageType>
+                    <packageType>mixed</packageType>
                     <name>assessment.ui.config</name>
                     <allowIndexDefinitions>true</allowIndexDefinitions>
                     <dependencies>
-			            <dependency>
-			                <groupId>com.assessment</groupId>
-			                <artifactId>assessment.ui.apps.structure</artifactId>
-			                <version>${project.version}</version>
-			            </dependency>
-			        </dependencies>
+                        <dependency>
+                            <groupId>com.assessment</groupId>
+                            <artifactId>assessment.ui.apps.structure</artifactId>
+                        </dependency>
+                    </dependencies>
                 </configuration>
             </plugin>
         </plugins>
     </build>
 </project>
-

@@ -1,23 +1,23 @@
-<sly data-sly-use.weatherModel="com.assessment.core.models.WeatherModel"></sly>
-<div class="cmp-weather" data-city="${properties.city @ context='unsafe'}">
-    <h2>${weatherModel.pageTitle @ context='unsafe'}</h2>
-    <div class="cmp-weather__server">
-        ${weatherModel.weatherJson @ context='unsafe'}
-    </div>
-    <div class="cmp-weather__client"></div>
-    <script>
-        (function () {
-            var apiKey = 'frontend-weather-key-legacy-123';
-            var city = '${properties.city @ context="unsafe"}' || 'Bogota';
+<sly data-sly-use.weather="com.assessment.core.models.WeatherModel"
+     data-sly-use.templates="core/wcm/components/commons/v1/templates.html">
 
-            fetch('https://goweather.xyz/weather/' + city + '?apikey=' + apiKey)
-                .then(function (response) {
-                    return response.json();
-                })
-                .then(function (data) {
-                    document.querySelector('.cmp-weather__client').innerHTML =
-                        '<p>' + city + ': ' + data.temperature + ' / ' + data.description + '</p>';
-                });
-        }());
-    </script>
-</div>
+    <div class="cmp-weather" data-sly-test.hasData="${weather.available}">
+        <h3 class="cmp-weather__title">${weather.pageTitle}</h3>
+        
+        <div class="cmp-weather__info">
+            <span class="cmp-weather__city">Weather for <strong>${weather.city}</strong>:</span>
+            <span class="cmp-weather__temp">${weather.temperature}</span>
+            <span class="cmp-weather__description">${weather.description}</span>
+        </div>
+
+        <p data-sly-test="${wcmmode.edit}" class="cmp-weather__debug">
+            <small>Data Source: ${weather.fromCache ? 'Internal Cache' : 'External API'}</small>
+        </p>
+    </div>
+
+    <div class="cmp-weather__fallback" data-sly-test="${!hasData && !wcmmode.edit}">
+        <p><em>Weather information is currently unavailable for ${weather.city || 'this location'}. Please try again later.</em></p>
+    </div>
+
+    <sly data-sly-call="${templates.placeholder @ isEmpty=!hasData, emptyTextAppend='Please configure a city in the component dialog.'}"></sly>
+</sly>

@@ -23,7 +23,7 @@
                 <extensions>true</extensions>
                 <configuration>
                     <group>assessment</group>
-                    <packageType>application</packageType>
+                    <packageType>mixed</packageType>
                     <name>assessment.ui.apps.structure</name>
                     <allowIndexDefinitions>true</allowIndexDefinitions>
                 </configuration>
@@ -31,4 +31,3 @@
         </plugins>
     </build>
 </project>
-

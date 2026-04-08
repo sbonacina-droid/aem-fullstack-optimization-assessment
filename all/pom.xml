@@ -13,7 +13,6 @@
     <artifactId>assessment.all</artifactId>
     <packaging>content-package</packaging>
     <name>Assessment - All</name>
-    
 
     <dependencies>
         <dependency>
@@ -58,7 +57,6 @@
                     <group>assessment</group>
                     <packageType>container</packageType>
                     <name>assessment.all</name>
-                    <skipSubPackageValidation>true</skipSubPackageValidation>
                     <embeddeds>
                         <embedded>
                             <groupId>com.assessment</groupId>
