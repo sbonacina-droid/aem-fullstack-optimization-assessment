@@ -37,10 +37,4 @@ This document outlines key architectural choices such as caching strategy, confi
 **Fixes Applied:**
 * Renamed all instances of `jcr_content` in the source folders to `_jcr_content`.
 * **Reasoning:** FileVault requires a leading underscore (`_jcr_content`) in the local file system to correctly translate the folder name to `jcr:content` (with a colon) upon deployment to the AEM JCR.
-
-### 4. General Project & Server Maintenance
-
-**Issue:** Packages were deploying as broken/empty `.zip` files, causing the AEM JCR Installer queue to deadlock.
-**Fixes Applied:**
-* Deleted hardcoded `properties.xml` files from `src/main/content/META-INF/vault/` directories across the project. This forces Maven to dynamically generate accurate metadata based on the `pom.xml` definitions.
-* Restarted the local AEM server to clear the frozen JCR Installer memory queue and successfully deploy the clean packages.
+* Fixed editable template and policy

@@ -3,7 +3,4 @@
           xmlns:cq="http://www.day.com/jcr/cq/1.0"
           xmlns:sling="http://sling.apache.org/jcr/sling/1.0"
           jcr:primaryType="cq:PageContent"
-          cq:allowedTemplates="[/conf/assessment/settings/wcm/templates/.*]"
-          status="enabled"
           sling:resourceType="wcm/core/components/policies/mappings"/>
-
