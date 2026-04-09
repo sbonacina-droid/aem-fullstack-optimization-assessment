@@ -1,7 +1,7 @@
 /filters {
-    /0001 { /type "allow" /method "GET" /url "/content/*" }
-    /0010 { /type "allow" /url "/etc.clientlibs/*" }
-    /0020 { /type "allow" /url "/bin/*" }
-    /0030 { /type "allow" /url "/libs/granite/csrf/token.json" }
+    /0000 { /type "deny"  /url "*" }
+    /0010 { /type "allow" /method '(GET|HEAD)' /path "/content/assessment" /extension "html" }
+    /0020 { /type "allow" /method '(GET|HEAD)' /path "/content/dam/assessment" /extension '(png|jpg|jpeg|gif|svg|webp|pdf)' }
+    /0030 { /type "allow" /method '(GET|HEAD)' /path "/etc.clientlibs" /extension '(css|js|woff|woff2|ttf|eot|svg|png|jpg|gif)' }
+    /0040 { /type "allow" /method "GET" /url "/libs/granite/csrf/token.json" }
 }
-

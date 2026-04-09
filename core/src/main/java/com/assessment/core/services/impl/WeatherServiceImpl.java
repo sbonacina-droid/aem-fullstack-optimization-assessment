@@ -36,213 +36,228 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 @Designate(ocd = WeatherServiceImpl.OsgiConfig.class)
 public class WeatherServiceImpl implements WeatherService {
 
-    private static final Logger LOG = LoggerFactory.getLogger(WeatherServiceImpl.class);
-    private static final String DEFAULT_WEATHER_REQUEST_TEMPLATE = "https://goweather.xyz/weather/{city}?apikey={apiKey}";
-    private static final Pattern DISALLOWED_CITY_CHARS = Pattern.compile("[^\\p{L}\\p{N}\\s\\-]");
-    
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+	private static final Logger LOG = LoggerFactory.getLogger(WeatherServiceImpl.class);
 
-    @ObjectClassDefinition(name = "Assessment Weather Service")
-    public @interface OsgiConfig {
-        @AttributeDefinition(name = "Weather API key") String api_key() default "";
-        @AttributeDefinition(name = "Default request template") String default_request_template() default DEFAULT_WEATHER_REQUEST_TEMPLATE;
-        @AttributeDefinition(name = "Default city") String default_city() default "Madrid";
-        @AttributeDefinition(name = "Default cache TTL (seconds)") int default_cache_ttl_seconds() default 300;
-        @AttributeDefinition(name = "Default network timeout (ms)") int default_network_timeout_millis() default 2000;
-    }
+	private static final Pattern DISABLED_PATTERN = Pattern.compile("[^\\p{L}\\p{N}\\s\\-]");
 
-    private final Map<String, CacheEntry> cache = new ConcurrentHashMap<>();
-    private final Map<String, CompletableFuture<WeatherBean>> inFlight = new ConcurrentHashMap<>();
-    private final Clock clock;
-    
-    private HttpClient httpClient;
-    private String globalApiKey; // Renamed for clarity
-    private String defaultRequestTemplate;
-    private String defaultCity;
-    private int defaultCacheTtlSeconds;
-    private int defaultNetworkTimeoutMillis;
+	private static final String DEFAULT_ENDPOINT = "https://goweather.xyz/weather/{city}?apikey={apiKey}";
 
-    public WeatherServiceImpl() {
-        this(Clock.systemUTC());
-    }
+	private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    WeatherServiceImpl(Clock clock) {
-        this.clock = clock;
-        this.httpClient = HttpClient.newBuilder().build();
-        this.globalApiKey = "";
-        this.defaultRequestTemplate = DEFAULT_WEATHER_REQUEST_TEMPLATE;
-        this.defaultCity = "Madrid";
-        this.defaultCacheTtlSeconds = 300;
-        this.defaultNetworkTimeoutMillis = 2000;
-    }
+	@ObjectClassDefinition(name = "Assessment Weather Service")
+	public @interface OsgiConfig {
+		@AttributeDefinition(name = "Default request template")
+		String default_request_template() default DEFAULT_ENDPOINT;
 
-    @Activate
-    protected void activate(OsgiConfig config) {
-        this.globalApiKey = valueOrDefault(config.api_key(), "");
-        this.defaultRequestTemplate = valueOrDefault(config.default_request_template(), DEFAULT_WEATHER_REQUEST_TEMPLATE);
-        this.defaultCity = valueOrDefault(config.default_city(), "Madrid");
-        this.defaultCacheTtlSeconds = Math.max(1, config.default_cache_ttl_seconds());
-        this.defaultNetworkTimeoutMillis = Math.max(100, config.default_network_timeout_millis());
-        
-        this.httpClient = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofMillis(defaultNetworkTimeoutMillis))
-                .build();
-        this.cache.clear();
-        this.inFlight.clear();
-    }
+		@AttributeDefinition(name = "Weather API key")
+		String api_key() default "";
 
-    @Override
-    public WeatherBean getForecast(String city, Resource contextResource) {
-        TenantSettings settings = resolveTenantSettings(contextResource);
-        String effectiveCity = sanitizeCity(city).isEmpty() ? settings.defaultCity : sanitizeCity(city);
-        
-        String cacheKey = (settings.requestTemplate + "|" + settings.apiKey + "|" + effectiveCity).toLowerCase(Locale.ROOT);
+		@AttributeDefinition(name = "Default city")
+		String default_city() default "Madrid";
 
-        CacheEntry current = cache.get(cacheKey);
-        if (current != null && current.isFresh(clock.millis())) {
-            return current.weatherData.withFromCache(true);
-        }
+		@AttributeDefinition(name = "Default network timeout (ms)")
+		int default_network_timeout_millis() default 2000;
 
-        CompletableFuture<WeatherBean> refresh = inFlight.computeIfAbsent(
-                cacheKey, key -> fetchAndCache(cacheKey, effectiveCity, settings));
-        refresh.whenComplete((result, error) -> inFlight.remove(cacheKey));
+		@AttributeDefinition(name = "Default cache TTL (seconds)")
+		int default_cache_ttl_seconds() default 300;
+	}
 
-        if (current != null) {
-            return current.weatherData.withFromCache(true);
-        }
+	private final Map<String, ForecastCacheEntry> forecastCache = new ConcurrentHashMap<>();
 
-        try {
-            return refresh.get(Math.max(100, settings.networkTimeoutMillis), TimeUnit.MILLISECONDS);
-        } catch (Exception e) {
-            LOG.warn("Weather lookup failed or timed out for city {}", effectiveCity, e);
-            return WeatherBean.unavailable(effectiveCity);
-        }
-    }
+	private final Map<String, CompletableFuture<WeatherBean>> pendingRequests = new ConcurrentHashMap<>();
 
-    private CompletableFuture<WeatherBean> fetchAndCache(String cacheKey, String city, TenantSettings settings) {
-        String requestUrl = buildRequestUrl(settings, city);
-        int timeoutMillis = Math.max(100, settings.networkTimeoutMillis);
+	private final Clock clock;
 
-        return executeHttpRequest(requestUrl, timeoutMillis)
-                .handle((payload, error) -> {
-                    if (error != null) {
-                        LOG.warn("Weather request failed for city {}", city, error);
-                        return WeatherBean.unavailable(city);
-                    }
-                    return getWeatherBean(city, payload);
-                })
-                .thenApply(weatherData -> {
-                    long ttlMillis = Math.max(1, settings.cacheTtlSeconds) * 1000L;
-                    if (cache.size() > 1000) {
-                        LOG.warn("Weather cache exceeded 1000 entries. Clearing cache to prevent OOM.");
-                        cache.clear();
-                    }
-                    cache.put(cacheKey, new CacheEntry(weatherData, clock.millis() + ttlMillis));
-                    return weatherData;
-                });
-    }
+	private HttpClient httpClient;
+	private String defaultRequestTemplate;
+	private String globalApiKey;
+	private String defaultCity;
+	private int defaultNetworkTimeoutMillis;
+	private int defaultCacheTtlSeconds;
 
-    protected CompletableFuture<String> executeHttpRequest(String requestUrl, int timeoutMillis) {
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(requestUrl))
-                .timeout(Duration.ofMillis(timeoutMillis))
-                .GET()
-                .build();
+	public WeatherServiceImpl() {
+		this(Clock.systemUTC());
+	}
 
-        return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-                .thenApply(response -> {
-                    if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                        throw new CompletionException(new IllegalStateException("API Error: " + response.statusCode()));
-                    }
-                    return response.body();
-                });
-    }
+	WeatherServiceImpl(Clock clock) {
+		this.clock = clock;
+		this.httpClient = HttpClient.newBuilder().build();
+		this.defaultRequestTemplate = DEFAULT_ENDPOINT;
+		this.globalApiKey = "";
+		this.defaultCity = "Madrid";
+		this.defaultNetworkTimeoutMillis = 2000;
+		this.defaultCacheTtlSeconds = 300;
+	}
 
-    private WeatherBean getWeatherBean(String city, String payload) {
-        if (payload == null || payload.isBlank()) return WeatherBean.unavailable(city);
-        try {
-            JsonNode root = MAPPER.readTree(payload);
-            String temp = root.path("temperature").asText("");
-            String desc = root.path("description").asText("");
+	@Activate
+	protected void activate(OsgiConfig config) {
+		this.defaultRequestTemplate = defaultIfBlank(config.default_request_template(), DEFAULT_ENDPOINT);
+		this.globalApiKey = defaultIfBlank(config.api_key(), "");
+		this.defaultCity = defaultIfBlank(config.default_city(), "Madrid");
+		this.defaultNetworkTimeoutMillis = Math.max(100, config.default_network_timeout_millis());
+		this.defaultCacheTtlSeconds = Math.max(1, config.default_cache_ttl_seconds());
 
-            if (temp.isEmpty() && root.has("main")) {
-                temp = root.path("main").path("temp").asText("") + " C";
-            }
-            if (desc.isEmpty() && root.has("weather") && root.path("weather").isArray()) {
-                desc = root.path("weather").get(0).path("description").asText("");
-            }
+		this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofMillis(defaultNetworkTimeoutMillis))
+				.build();
+		this.forecastCache.clear();
+		this.pendingRequests.clear();
+	}
 
-            if (temp.isEmpty() && desc.isEmpty()) return WeatherBean.unavailable(city);
-            return WeatherBean.of(city, temp, desc, payload);
-        } catch (Exception e) {
-            LOG.warn("Failed to parse JSON response for city: {}", city, e);
-            return WeatherBean.unavailable(city);
-        }
-    }
+	@Override
+	public WeatherBean getForecast(String city, Resource contextResource) {
+		WeatherApiSettings settings = resolveTenantSettings(contextResource);
+		String safeCity = getSafeCity(city).isEmpty() ? settings.defaultCity : getSafeCity(city);
 
-    private TenantSettings resolveTenantSettings(Resource contextResource) {
-        if (contextResource != null) {
-            ConfigurationBuilder configBuilder = contextResource.adaptTo(ConfigurationBuilder.class);
-            if (configBuilder != null) {
-                WeatherConfig tenantConfig = configBuilder.as(WeatherConfig.class);
-                if (tenantConfig != null) {
-                    return new TenantSettings(
-                            valueOrDefault(tenantConfig.apiKey(), globalApiKey),
-                            valueOrDefault(tenantConfig.endpoint(), defaultRequestTemplate),
-                            valueOrDefault(tenantConfig.defaultCity(), defaultCity),
-                            Math.max(1, tenantConfig.ttlCache()),
-                            Math.max(100, tenantConfig.networkTimeoutMillis())
-                    );
-                }
-            }
-        }
-        return new TenantSettings(globalApiKey, defaultRequestTemplate, defaultCity, defaultCacheTtlSeconds, defaultNetworkTimeoutMillis);
-    }
+		String cacheKey = (settings.endpoint + "|" + settings.apiKey + "|" + safeCity).toLowerCase(Locale.ROOT);
 
-    private String buildRequestUrl(TenantSettings settings, String city) {
-        String encodedCity = URLEncoder.encode(city, StandardCharsets.UTF_8);
-        String encodedApiKey = URLEncoder.encode(settings.apiKey, StandardCharsets.UTF_8);
-        
-        return settings.requestTemplate
-                .replace("{city}", encodedCity)
-                .replace("{apiKey}", encodedApiKey);
-    }
+		ForecastCacheEntry entry = forecastCache.get(cacheKey);
+		if (entry != null && entry.isFresh(clock.millis())) {
+			return entry.weatherData.withFromCache(true);
+		}
 
-    private String sanitizeCity(String city) {
-        return city == null ? "" : DISALLOWED_CITY_CHARS.matcher(city).replaceAll("").trim();
-    }
+		CompletableFuture<WeatherBean> refresh = pendingRequests.computeIfAbsent(cacheKey,
+				key -> loadWeatherAsync(cacheKey, safeCity, settings));
+		refresh.whenComplete((result, error) -> pendingRequests.remove(cacheKey));
 
-    private String valueOrDefault(String value, String fallback) {
-        return (value == null || value.isBlank()) ? fallback : value;
-    }
+		if (entry != null) {
+			return entry.weatherData.withFromCache(true);
+		}
 
-    private static final class TenantSettings {
-        final String apiKey;
-        final String requestTemplate;
-        final String defaultCity;
-        final int cacheTtlSeconds;
-        final int networkTimeoutMillis;
+		try {
+			return refresh.get(Math.max(100, settings.networkTimeoutMillis), TimeUnit.MILLISECONDS);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			LOG.warn("Request was interrupted for city {}", safeCity, e);
+			return WeatherBean.unavailable(safeCity);
+		} catch (Exception e) {
+			LOG.warn("Request failed for city {}", safeCity, e);
+			return WeatherBean.unavailable(safeCity);
+		}
+	}
 
-        TenantSettings(String apiKey, String requestTemplate, String defaultCity, int cacheTtlSeconds, int networkTimeoutMillis) {
-            this.apiKey = apiKey;
-            this.requestTemplate = requestTemplate;
-            this.defaultCity = defaultCity;
-            this.cacheTtlSeconds = cacheTtlSeconds;
-            this.networkTimeoutMillis = networkTimeoutMillis;
-        }
-    }
+	private CompletableFuture<WeatherBean> loadWeatherAsync(String cacheKey, String city, WeatherApiSettings settings) {
+		String requestUrl = buildRequestUrl(settings, city);
+		int timeoutMillis = Math.max(100, settings.networkTimeoutMillis);
 
-    private static final class CacheEntry {
-        final WeatherBean weatherData;
-        final long expiresAt;
+		return callWeatherApiAsync(requestUrl, timeoutMillis).handle((payload, error) -> {
+			if (error != null) {
+				LOG.warn("Weather request failed for city {}", city, error);
+				return WeatherBean.unavailable(city);
+			}
+			return getWeatherBean(city, payload);
+		}).thenApply(weatherData -> {
+			long ttlMillis = Math.max(1, settings.cacheTtlSeconds) * 1000L;
+			if (forecastCache.size() > 1000) {
+				LOG.warn("Weather cache exceeded 1000 entries. Clearing cache to prevent OOM.");
+				forecastCache.clear();
+			}
+			forecastCache.put(cacheKey, new ForecastCacheEntry(weatherData, clock.millis() + ttlMillis));
+			return weatherData;
+		});
+	}
 
-        CacheEntry(WeatherBean weatherData, long expiresAt) {
-            this.weatherData = weatherData;
-            this.expiresAt = expiresAt;
-        }
+	protected CompletableFuture<String> callWeatherApiAsync(String requestUrl, int timeoutMillis) {
+		HttpRequest request = HttpRequest.newBuilder().uri(URI.create(requestUrl)).header("Accept", "application/json")
+				.timeout(Duration.ofMillis(timeoutMillis)).GET().build();
 
-        boolean isFresh(long now) {
-            return now < expiresAt;
-        }
-    }
+		return httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
+				.thenApply(response -> {
+					if (response.statusCode() < 200 || response.statusCode() >= 300) {
+						String errorMsg = String.format("API Error: %d. Details: %s", response.statusCode(),
+								response.body());
+						throw new CompletionException(new IllegalStateException(errorMsg));
+					}
+					return response.body();
+				});
+	}
+
+	private WeatherApiSettings resolveTenantSettings(Resource contextResource) {
+		if (contextResource != null) {
+			ConfigurationBuilder configBuilder = contextResource.adaptTo(ConfigurationBuilder.class);
+			if (configBuilder != null) {
+				WeatherConfig tenantConfig = configBuilder.as(WeatherConfig.class);
+				if (tenantConfig != null) {
+					return new WeatherApiSettings(defaultIfBlank(tenantConfig.apiKey(), globalApiKey),
+							defaultIfBlank(tenantConfig.endpoint(), defaultRequestTemplate),
+							defaultIfBlank(tenantConfig.defaultCity(), defaultCity),
+							Math.max(1, tenantConfig.ttlCache()), Math.max(100, tenantConfig.networkTimeoutMillis()));
+				}
+			}
+		}
+		return new WeatherApiSettings(globalApiKey, defaultRequestTemplate, defaultCity, defaultCacheTtlSeconds,
+				defaultNetworkTimeoutMillis);
+	}
+
+	private String buildRequestUrl(WeatherApiSettings settings, String city) {
+		String encodedCity = URLEncoder.encode(city, StandardCharsets.UTF_8);
+		String encodedApiKey = URLEncoder.encode(settings.apiKey, StandardCharsets.UTF_8);
+
+		return settings.endpoint.replace("{city}", encodedCity).replace("{apiKey}", encodedApiKey);
+	}
+
+	private String getSafeCity(String city) {
+		return city == null ? "" : DISABLED_PATTERN.matcher(city).replaceAll("").trim();
+	}
+
+	private String defaultIfBlank(String value, String fallback) {
+		return (value == null || value.isBlank()) ? fallback : value;
+	}
+
+	private WeatherBean getWeatherBean(String city, String jsonContent) {
+		if (jsonContent == null || jsonContent.isBlank()) {
+			return WeatherBean.unavailable(city);
+		}
+
+		try {
+			JsonNode root = MAPPER.readTree(jsonContent);
+
+			String temperature = root.path("temperature").asText("");
+			String description = root.path("description").asText("");
+
+			if (temperature.isEmpty() && root.has("main")) {
+				temperature = root.path("main").path("temp").asText("") + " C";
+			}
+			if (description.isEmpty() && root.path("weather").isArray()) {
+				description = root.path("weather").path(0).path("description").asText("");
+			}
+
+			if (temperature.isEmpty() && description.isEmpty())
+				return WeatherBean.unavailable(city);
+			return WeatherBean.of(city, temperature, description);
+		} catch (Exception e) {
+			LOG.warn("Failed to parse JSON response for city: {}", city, e);
+			return WeatherBean.unavailable(city);
+		}
+	}
+
+	private static final class WeatherApiSettings {
+		final String apiKey;
+		final String endpoint;
+		final String defaultCity;
+		final int networkTimeoutMillis;
+		final int cacheTtlSeconds;
+
+		WeatherApiSettings(String apiKey, String endpoint, String defaultCity, int cacheTtlSeconds,
+				int networkTimeoutMillis) {
+			this.apiKey = apiKey;
+			this.endpoint = endpoint;
+			this.defaultCity = defaultCity;
+			this.networkTimeoutMillis = networkTimeoutMillis;
+			this.cacheTtlSeconds = cacheTtlSeconds;
+		}
+	}
+
+	private static final class ForecastCacheEntry {
+		final WeatherBean weatherData;
+		final long expiresAt;
+
+		ForecastCacheEntry(WeatherBean weatherData, long expiresAt) {
+			this.weatherData = weatherData;
+			this.expiresAt = expiresAt;
+		}
+
+		boolean isFresh(long currentTimeMillis) {
+			return currentTimeMillis < expiresAt;
+		}
+	}
 }
